@@ -3,3 +3,4 @@ cmake_install.cmake
 CMakeCache.txt
 Makefile
 rt_comm
+comm_adapter_bs

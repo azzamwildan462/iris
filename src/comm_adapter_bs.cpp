@@ -35,6 +35,9 @@
 #define ZLIB_COMPRESS 1
 #define LZ4_COMPRESS 2
 
+// Program frequency (Hz)
+#define FREQUENCY 50
+
 // Socket
 typedef struct multiSocket_tag
 {
@@ -60,8 +63,11 @@ pthread_attr_t thread_attr;
 uint8_t end_signal_counter;
 
 // Data
-char data[128] = "its3123456908its";
+char data[128] = "3123456908its";
 unsigned long int actual_data_size = 15;
+unsigned long int recv_data_size;
+unsigned long int max_recv_data_size = 128;
+char recv_data[128];
 
 int if_NameToIndex(char *ifname, char *address)
 {
@@ -184,6 +190,7 @@ void loadConfig()
     strcpy(nw_config.multicast_ip, "224.168.1.80");
     nw_config.port = 2482;
     nw_config.compress_type = UNCOMPRESS;
+    // nw_config.compress_type = LZ4_COMPRESS;
 }
 
 int sendData()
@@ -255,20 +262,16 @@ int sendData()
 
     return 0;
 }
-void *receiveData(void *arg)
+void *receiveData(void *socket_id)
 {
-    unsigned long int max_recv_data_size = 128;
-    char recv_data[128];
-    unsigned long int recv_data_size;
-    multiSocket_t *socket = (multiSocket_t *)arg;
-
+    // char *prev_src = "qweqwe";
     while (end_signal_counter == 0)
     {
         struct sockaddr src_addr;
         socklen_t addr_len;
 
         char recv_buffer[recv_data_size];
-        int nrecv = recvfrom(socket->socketID, (void *)recv_buffer, max_recv_data_size, 0, &src_addr, &addr_len);
+        int nrecv = recvfrom(multiSocket.socketID, (void *)recv_buffer, max_recv_data_size, 0, &src_addr, &addr_len);
 #ifdef COMM_DEBUG
         printf("Buffer, nrecv: %d -> %s\n", nrecv, recv_buffer);
 #endif
@@ -293,13 +296,20 @@ void *receiveData(void *arg)
                 printf("size: %d and %d\n", recv_data_size, nrecv);
                 recv_data_size = LZ4_decompress_safe(recv_buffer, &recv_data[0], nrecv, recv_data_size);
             }
-            char *data = inet_ntoa(((struct sockaddr_in *)&src_addr)->sin_addr);
+            char *src_ip = inet_ntoa(((struct sockaddr_in *)&src_addr)->sin_addr);
 #if defined(COMM_DEBUG) || defined(COMM_TEST)
             printf("[recv] nrecv: %d -> %s \n", recv_data_size, recv_data);
-            printf("[recv] recv_from: %s\n", data);
+            printf("[recv] recv_from: %s\n", src_ip);
 #endif
+            // printf("error %d\n", strcmp(src_ip, prev_src));
+            // if (strcmp(src_ip, prev_src) == 0)
+            // {
+            //     printf("data valid\n");
+            // }
+            // strcpy(prev_src, src_ip);
         }
     }
+    printf("Recv thread exited\n");
     pthread_exit(NULL);
     return NULL;
 }
@@ -309,7 +319,7 @@ void signalHandler(int sig)
     printf("Terminate with custom signal handler\n");
     closeSocket();
     end_signal_counter++;
-    if (end_signal_counter == 3) // Ketika gagal memberi sinyal terimate untuk recv_thread
+    if (end_signal_counter == 3) // Force close if other thread cannot be killed by signal
         abort();
 }
 
@@ -339,11 +349,9 @@ int main()
     end_signal_counter = 0;
 
     // Create new thread to receive data
-    multiSocket_t recv_sckt;
-    recv_sckt.socketID = multiSocket.socketID;
     pthread_attr_init(&thread_attr);
     pthread_attr_setinheritsched(&thread_attr, PTHREAD_INHERIT_SCHED);
-    if (pthread_create(&recv_thread, &thread_attr, receiveData, (void *)&recv_sckt) != 0)
+    if (pthread_create(&recv_thread, &thread_attr, receiveData, (void *)&multiSocket.socketID) != 0)
     {
         PERRNO("pthread_create");
         closeSocket();
