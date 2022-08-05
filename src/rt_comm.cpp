@@ -23,7 +23,8 @@
 #include "lz4.h"
 
 // #define COMM_DEBUG // Activate it to debug
-#define COMM_TEST // Activate it to test the program
+#define COMM_TEST            // Activate it to test the program
+#define USE_REALTIME_PROCESS // Activate it to use realtime process
 
 #define PERR(txt, par...) \
     printf("ERROR: (%s / %s): " txt "\n", __FILE__, __FUNCTION__, ##par)
@@ -322,13 +323,14 @@ int main()
 
     signal(SIGINT, signalHandler);
 
-    /* Assign a real-time priority to process */
+#ifdef USE_REALTIME_PROCESS
     proc_sched.sched_priority = 60;
     if ((sched_setscheduler(getpid(), SCHED_FIFO, &proc_sched)) < 0)
     {
         PERRNO("setscheduler");
         return -1;
     }
+#endif
 
     if (openSocket() == -1)
     {
