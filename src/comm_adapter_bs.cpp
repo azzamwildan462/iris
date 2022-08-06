@@ -196,6 +196,12 @@ void loadConfig()
 
 int saveData(MDB_env *env, MDB_dbi *dbi, char *data_recvd)
 {
+    // Header check
+    if (data_recvd[0] != 'i' || data_recvd[1] != 't' || data_recvd[2] != 's')
+    {
+        printf("Data invalid\n");
+        return -2;
+    }
     // Create init variables
     int rc;
     MDB_val key, value;
@@ -253,7 +259,7 @@ void loadData(MDB_env *env, MDB_dbi *dbi)
 
     // Get data from DB
     E(mdb_txn_begin(env, NULL, 0, &txn));
-    char data_buffer[1024];
+    // char data_buffer[1024];
     int value_pos = 4;
     for (int i = 0; i < total_items; i++)
     {
