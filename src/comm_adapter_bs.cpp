@@ -21,22 +21,22 @@
 #include <linux/if_ether.h>
 #include "zlib.h"
 #include "lz4.h"
+#include "lmdb.h"
 
 // #define COMM_DEBUG // Activate it to debug
-#define COMM_TEST // Activate it to test the program
+#define COMM_MULTICAST_TEST  // Activate it to test program
+#define USE_REALTIME_PROCESS // Activate it to use realtime process
 
-#define PERR(txt, par...) \
-    printf("ERROR: (%s / %s): " txt "\n", __FILE__, __FUNCTION__, ##par)
-#define PERRNO(txt) \
-    printf("ERROR: (%s / %s): " txt ": %s\n", __FILE__, __FUNCTION__, strerror(errno))
+#define E(expr) CHECK((rc = (expr)) == MDB_SUCCESS, #expr)
+#define RES(err, expr) ((rc = expr) == (err) || (CHECK(!rc, #expr), 0))
+#define CHECK(test, msg) ((test) ? (void)0 : ((void)fprintf(stderr, "%s:%d: %s: %s\n", __FILE__, __LINE__, msg, mdb_strerror(rc)), abort()))
+#define PERR(txt, par...) printf("ERROR: (%s / %s): " txt "\n", __FILE__, __FUNCTION__, ##par)
+#define PERRNO(txt) printf("ERROR: (%s / %s): " txt ": %s\n", __FILE__, __FUNCTION__, strerror(errno))
 
 // Compress data
 #define UNCOMPRESS 0
 #define ZLIB_COMPRESS 1
 #define LZ4_COMPRESS 2
-
-// Program frequency (Hz)
-#define FREQUENCY 50
 
 // Socket
 typedef struct multiSocket_tag
@@ -51,6 +51,7 @@ typedef struct nw_config
     char *iface;
     unsigned int port;
     uint8_t compress_type;
+    char identifier[1];
 } config;
 multiSocket_t multiSocket;
 
@@ -63,11 +64,10 @@ pthread_attr_t thread_attr;
 uint8_t end_signal_counter;
 
 // Data
-char data[128] = "3123456908its";
+char data[128] = "its3123456908its";
+// char data[128];
+char its[4] = "its";
 unsigned long int actual_data_size = 15;
-unsigned long int recv_data_size;
-unsigned long int max_recv_data_size = 128;
-char recv_data[128];
 
 int if_NameToIndex(char *ifname, char *address)
 {
@@ -163,12 +163,12 @@ int openSocket()
     }
 
     /* Disable reception of our own multicast */
-    opt = 0;
-    if ((setsockopt(multiSocket.socketID, IPPROTO_IP, IP_MULTICAST_LOOP, &opt, sizeof(opt))) == -1)
-    {
-        PERRNO("setsockopt");
-        return -1;
-    }
+    // opt = 0;
+    // if ((setsockopt(multiSocket.socketID, IPPROTO_IP, IP_MULTICAST_LOOP, &opt, sizeof(opt))) == -1)
+    // {
+    //     PERRNO("setsockopt");
+    //     return -1;
+    // }
 
     if (bind(multiSocket.socketID, (struct sockaddr *)&multicastAddress, sizeof(struct sockaddr_in)) == -1)
     {
@@ -190,7 +190,89 @@ void loadConfig()
     strcpy(nw_config.multicast_ip, "224.168.1.80");
     nw_config.port = 2482;
     nw_config.compress_type = UNCOMPRESS;
-    // nw_config.compress_type = LZ4_COMPRESS;
+    uint8_t identifier_buffer = 3;
+    sprintf(nw_config.identifier, "%d", identifier_buffer);
+}
+
+int saveData(MDB_env *env, MDB_dbi *dbi, char *data_recvd)
+{
+    // Create init variables
+    int rc;
+    MDB_val key, value;
+    MDB_txn *txn;
+
+    // Data to be saved
+    char identifier[1];
+    char keys[4][16] = {"odom_x", "odom_y", "odom_theta"};
+    int key_size[4] = {7, 7, 11};
+    int value_pos[4] = {4, 7, 10};
+    int value_size[4] = {3, 3, 3};
+    int total_items = 3;
+
+    // Get identifier
+    memcpy(&identifier, data_recvd + 3, 1);
+
+    // Push data to DB
+    E(mdb_txn_begin(env, NULL, 0, &txn));
+    char data_buffer[1024];
+    for (int i = 0; i < total_items; i++)
+    {
+        // printf("key_size: %d\n", key_size[i]);
+        strcat(keys[i], identifier);
+        key.mv_size = key_size[i];
+        key.mv_data = keys[i];
+        value.mv_size = value_size[i];
+        memcpy(&data_buffer, data_recvd + value_pos[i], value_size[i]);
+        value.mv_data = data_buffer;
+        if (RES(MDB_PROBLEM, mdb_put(txn, *dbi, &key, &value, 0)) != 0)
+        {
+            mdb_txn_abort(txn);
+            return -1;
+        }
+    }
+    E(mdb_txn_commit(txn));
+    // E(mdb_env_stat(env, &mst));
+
+    return 0;
+}
+
+void loadData(MDB_env *env, MDB_dbi *dbi)
+{
+    // Create init variables
+    int rc;
+    MDB_val key, value;
+    MDB_txn *txn;
+
+    // Data to be saved
+    char identifier[1];
+    char keys[4][16] = {"odom_x", "odom_y", "odom_theta"};
+    int key_size[4] = {7, 7, 11};
+    // int value_pos[4] = {4, 7, 10};
+    // int value_size[4] = {3, 3, 3};
+    int total_items = 3;
+
+    // Get data from DB
+    E(mdb_txn_begin(env, NULL, 0, &txn));
+    char data_buffer[1024];
+    int value_pos = 4;
+    for (int i = 0; i < total_items; i++)
+    {
+        strcat(keys[i], nw_config.identifier);
+        key.mv_size = key_size[i];
+        key.mv_data = keys[i];
+        if (RES(MDB_PROBLEM, mdb_get(txn, *dbi, &key, &value)) != 0)
+        {
+            mdb_txn_abort(txn);
+            return;
+        }
+        memcpy(data, its, 3);                                   // Header
+        memcpy(data + 3, nw_config.identifier, 1);              // identifier
+        memcpy(data + value_pos, value.mv_data, value.mv_size); // data
+        value_pos += value.mv_size;
+    }
+    E(mdb_txn_commit(txn));
+    actual_data_size = value_pos;
+    printf("data_to_send: %s | size %d\n", data, value_pos);
 }
 
 int sendData()
@@ -199,7 +281,7 @@ int sendData()
     {
         // Just send
         int nsent = sendto(multiSocket.socketID, data, actual_data_size, 0, (struct sockaddr *)&multiSocket.destAddress, sizeof(struct sockaddr));
-#ifdef COMM_TEST
+#ifdef COMM_MULTICAST_TEST
         // printf("[send] size %d, data %s\n", actual_data_size, data);
 #endif
         if (nsent == actual_data_size)
@@ -225,7 +307,7 @@ int sendData()
         printf("Uncompress: %d and %d -> %s\n", sizeof(data_raw), sizeof(compressed_data), data_raw);
 #endif
         int nsent = sendto(multiSocket.socketID, compressed_data, compressed_data_size, 0, (struct sockaddr *)&multiSocket.destAddress, sizeof(struct sockaddr));
-#ifdef COMM_TEST
+#ifdef COMM_MULTICAST_TEST
         printf("[send] size %d, data %s\n", compressed_data_size, compressed_data);
 #endif
         if (nsent == compressed_data_size)
@@ -251,7 +333,7 @@ int sendData()
         printf("Uncompress: %d and %d -> %s\n", sizeof(data_raw), sizeof(compressed_data), data_raw);
 #endif
         int nsent = sendto(multiSocket.socketID, compressed_data, compressed_data_size, 0, (struct sockaddr *)&multiSocket.destAddress, sizeof(struct sockaddr));
-#ifdef COMM_TEST
+#ifdef COMM_MULTICAST_TEST
         printf("[send] size %d, data %s\n", compressed_data_size, compressed_data);
 #endif
         if (nsent == compressed_data_size)
@@ -262,16 +344,36 @@ int sendData()
 
     return 0;
 }
-void *receiveData(void *socket_id)
+void *receiveData(void *arg)
 {
-    // char *prev_src = "qweqwe";
+    unsigned long int max_recv_data_size = 128;
+    char recv_data[128];
+    unsigned long int recv_data_size;
+    multiSocket_t *socket = (multiSocket_t *)arg;
+
+    // Prepare for DB
+    int rc;
+    MDB_env *env;
+    MDB_dbi dbi;
+    MDB_txn *txn;
+    int dead;
+    int err = mdb_reader_check(env, &dead);
+
+    E(mdb_env_create(&env));
+    E(mdb_env_set_maxreaders(env, 5));
+    E(mdb_env_set_mapsize(env, 10485760)); // 10 MB
+    E(mdb_env_open(env, "dependencies/lmdb/libraries/liblmdb/cpp_js", MDB_FIXEDMAP | MDB_NOSYNC, 0664));
+    E(mdb_txn_begin(env, NULL, 0, &txn));
+    E(mdb_dbi_open(txn, NULL, MDB_DUPSORT, &dbi));
+    mdb_txn_commit(txn);
+
     while (end_signal_counter == 0)
     {
         struct sockaddr src_addr;
         socklen_t addr_len;
 
         char recv_buffer[recv_data_size];
-        int nrecv = recvfrom(multiSocket.socketID, (void *)recv_buffer, max_recv_data_size, 0, &src_addr, &addr_len);
+        int nrecv = recvfrom(socket->socketID, (void *)recv_buffer, max_recv_data_size, 0, &src_addr, &addr_len);
 #ifdef COMM_DEBUG
         printf("Buffer, nrecv: %d -> %s\n", nrecv, recv_buffer);
 #endif
@@ -296,20 +398,17 @@ void *receiveData(void *socket_id)
                 printf("size: %d and %d\n", recv_data_size, nrecv);
                 recv_data_size = LZ4_decompress_safe(recv_buffer, &recv_data[0], nrecv, recv_data_size);
             }
-            char *src_ip = inet_ntoa(((struct sockaddr_in *)&src_addr)->sin_addr);
-#if defined(COMM_DEBUG) || defined(COMM_TEST)
+            // Save data to DB
+            if (saveData(env, &dbi, recv_data) == -1)
+            {
+                pthread_exit(NULL);
+                return NULL;
+            }
+#if defined(COMM_DEBUG) || defined(COMM_MULTICAST_TEST)
             printf("[recv] nrecv: %d -> %s \n", recv_data_size, recv_data);
-            printf("[recv] recv_from: %s\n", src_ip);
 #endif
-            // printf("error %d\n", strcmp(src_ip, prev_src));
-            // if (strcmp(src_ip, prev_src) == 0)
-            // {
-            //     printf("data valid\n");
-            // }
-            // strcpy(prev_src, src_ip);
         }
     }
-    printf("Recv thread exited\n");
     pthread_exit(NULL);
     return NULL;
 }
@@ -319,26 +418,70 @@ void signalHandler(int sig)
     printf("Terminate with custom signal handler\n");
     closeSocket();
     end_signal_counter++;
-    if (end_signal_counter == 3) // Force close if other thread cannot be killed by signal
+    if (end_signal_counter == 3) // Ketika gagal memberi sinyal terimate untuk recv_thread
         abort();
 }
 
 int main()
 {
+    // int rc;
+    // MDB_env *env;
+    // MDB_dbi dbi;
+    // MDB_txn *txn;
+
+    // E(mdb_env_create(&env));
+    // E(mdb_env_set_maxreaders(env, 5));
+    // E(mdb_env_set_mapsize(env, 10485760)); // 10 MB
+    // E(mdb_env_open(env, "dependencies/lmdb/libraries/liblmdb/js_cpp", MDB_FIXEDMAP | MDB_NOSYNC, 0664));
+    // E(mdb_txn_begin(env, NULL, 0, &txn));
+    // E(mdb_dbi_open(txn, NULL, MDB_DUPSORT, &dbi));
+    // mdb_txn_commit(txn);
+
+    // saveData(env, &dbi, data);
+    // saveData(env, &dbi, data);
+    // saveData(env, &dbi, data);
+    // saveData(env, &dbi, data);
+    // saveData(env, &dbi, data);
+    // saveData(env, &dbi, data);
+    // return 0;
+
     printf("Start..\n");
     struct sched_param proc_sched;
 
     loadConfig();
 
+    // LMDB load data
+    // int rc;
+    // MDB_env *env;
+    // MDB_dbi dbi;
+    // MDB_txn *txn;
+    // int dead;
+    // int err = mdb_reader_check(env, &dead);
+
+    // E(mdb_env_create(&env));
+    // E(mdb_env_set_maxreaders(env, 5));
+    // E(mdb_env_set_mapsize(env, 10485760)); // 10 MB
+    // E(mdb_env_open(env, "dependencies/lmdb/libraries/liblmdb/cpp_js", MDB_FIXEDMAP | MDB_NOSYNC, 0664));
+    // E(mdb_txn_begin(env, NULL, 0, &txn));
+    // E(mdb_dbi_open(txn, NULL, MDB_DUPSORT, &dbi));
+    // mdb_txn_commit(txn);
+
+    // loadData(env, &dbi);
+    // loadData(env, &dbi);
+    // loadData(env, &dbi);
+    // loadData(env, &dbi);
+    // return 0;
+
     signal(SIGINT, signalHandler);
 
-    /* Assign a real-time priority to process */
+#ifdef USE_REALTIME_PROCESS
     proc_sched.sched_priority = 60;
     if ((sched_setscheduler(getpid(), SCHED_FIFO, &proc_sched)) < 0)
     {
         PERRNO("setscheduler");
         return -1;
     }
+#endif
 
     if (openSocket() == -1)
     {
@@ -349,22 +492,41 @@ int main()
     end_signal_counter = 0;
 
     // Create new thread to receive data
+    multiSocket_t recv_sckt;
+    recv_sckt.socketID = multiSocket.socketID;
     pthread_attr_init(&thread_attr);
     pthread_attr_setinheritsched(&thread_attr, PTHREAD_INHERIT_SCHED);
-    if (pthread_create(&recv_thread, &thread_attr, receiveData, (void *)&multiSocket.socketID) != 0)
+    if (pthread_create(&recv_thread, &thread_attr, receiveData, (void *)&recv_sckt) != 0)
     {
         PERRNO("pthread_create");
         closeSocket();
         return -1;
     }
 
-#ifdef COMM_TEST
+    // LMDB load data
+    int rc;
+    MDB_env *env;
+    MDB_dbi dbi;
+    MDB_txn *txn;
+    int dead;
+    int err = mdb_reader_check(env, &dead);
+
+    E(mdb_env_create(&env));
+    E(mdb_env_set_maxreaders(env, 5));
+    E(mdb_env_set_mapsize(env, 10485760));                                                               // 10 MB
+    E(mdb_env_open(env, "dependencies/lmdb/libraries/liblmdb/js_cpp", MDB_FIXEDMAP | MDB_NOSYNC, 0664)); //
+    E(mdb_txn_begin(env, NULL, 0, &txn));
+    E(mdb_dbi_open(txn, NULL, MDB_DUPSORT, &dbi));
+    mdb_txn_commit(txn);
+
+#ifdef COMM_MULTICAST_TEST
     int counter;
     while (end_signal_counter == 0)
     {
         if (++counter % 100000000 == 0)
         {
             // printf("counters: %d\n", counter);
+            loadData(env, &dbi);
             if (sendData() == -1)
             {
                 PERR("sendData");

@@ -20,19 +20,11 @@ INTERFACE_INCLUDE_DIRECTORIES ${LMDB_INCLUDE_PATH}
 )
 
 add_executable(rt_comm src/rt_comm.cpp)
-target_link_libraries(rt_comm 
-${LZ4_LIBRARIES} 
-z
--pthread
-)
+target_link_libraries(rt_comm ${LZ4_LIBRARIES} z -pthread)
 set_target_properties(rt_comm PROPERTIES COMPILE_FLAGS "-fPIC")
 
 add_executable(comm_adapter_bs src/comm_adapter_bs.cpp)
-target_link_libraries(comm_adapter_bs 
-${LZ4_LIBRARIES} 
-z
--pthread
-)
+target_link_libraries(comm_adapter_bs ${LZ4_LIBRARIES} z -pthread LMDB_LIB)
 set_target_properties(comm_adapter_bs PROPERTIES COMPILE_FLAGS "-fPIC")
 
 add_executable(iris_rtdb src/iris_rtdb.cpp)
