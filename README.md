@@ -30,6 +30,6 @@ make
 
 ## References
 
-LZ4 [https://github.com/lz4/lz4](https://github.com/lz4/lz4)
-LMDB [https://github.com/LMDB/lmdb](https://github.com/LMDB/lmdb)
+LZ4 [https://github.com/lz4/lz4](https://github.com/lz4/lz4)  
+LMDB [https://github.com/LMDB/lmdb](https://github.com/LMDB/lmdb)  
 JS-LMDB [https://github.com/Venemo/node-lmdb](https://github.com/Venemo/node-lmdb)

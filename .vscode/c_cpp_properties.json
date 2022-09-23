@@ -4,7 +4,9 @@
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/**",
-                "dependencies/lmdb/libraries/liblmdb/"
+                "dependencies/lmdb/libraries/liblmdb/",
+                "/home/wildan/ros/lib",
+                "/home/wildan/ros/include/include"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/clang",

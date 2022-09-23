@@ -21,6 +21,7 @@
 #include <linux/if_ether.h>
 #include "zlib.h"
 #include "lz4.h"
+#include "ros/ros.h"
 
 // #define COMM_DEBUG // Activate it to debug
 #define COMM_TEST            // Activate it to test the program
@@ -63,6 +64,21 @@ uint8_t end_signal_counter;
 // Data
 char data[128] = "its3123456908its";
 unsigned long int actual_data_size = 15;
+
+// ROS
+ros::Timer send_timer_50hz;
+ros::Timer recv_timer_50hz;
+
+ros::Subscriber sub_data_pc;
+ros::Publisher pub_data_pc;
+
+void cllbckTimSend(const ros::TimerEvent &event);
+void cllbckTimRecv(const ros::TimerEvent &event);
+
+// Data per items
+int odom_x;
+int odom_y;
+int theta;
 
 int if_NameToIndex(char *ifname, char *address)
 {
@@ -310,16 +326,33 @@ void signalHandler(int sig)
     printf("Terminate with custom signal handler\n");
     closeSocket();
     end_signal_counter++;
-    if (end_signal_counter == 3) // Ketika gagal memberi sinyal terminate untuk recv_thread
+    if (end_signal_counter == 3) // Ketika gagal memberi sinyal terimate untuk recv_thread
         abort();
 }
 
-int main()
+void callbackSubData(const iris_its::DataTxConstPtr &msg)
+{
+}
+
+void cllbckTimSend(const ros::TimerEvent &event)
+{
+}
+void cllbckTimRecv(const ros::TimerEvent &event)
+{
+    
+}
+
+int main(int argc, char **argv)
 {
     printf("Start..\n");
+    ros::init(argc, argv, "comm_multicast");
+    ros::NodeHandle NH;
     struct sched_param proc_sched;
 
     loadConfig();
+
+    sub_data_pc = NH.subscribe("pc2bs_telemetry", 16, &callbackSubData);
+    pub_basestation = NH.advertise<iris_its::DataRx>("bs2pc_telemetry", 16);
 
     signal(SIGINT, signalHandler);
 

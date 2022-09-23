@@ -27,8 +27,9 @@ add_executable(comm_adapter_bs src/comm_adapter_bs.cpp)
 target_link_libraries(comm_adapter_bs ${LZ4_LIBRARIES} z -pthread LMDB_LIB)
 set_target_properties(comm_adapter_bs PROPERTIES COMPILE_FLAGS "-fPIC")
 
-add_executable(iris_rtdb src/iris_rtdb.cpp)
-target_link_libraries(iris_rtdb LMDB_LIB)
+# Pre-served to be used in ROS environtments
+# add_executable(comm_multicast src/comm_multicast.cpp)
+# target_link_libraries(comm_multicast LMDB_LIB ${LZ4_LIBRARIES} z)
 
 
 

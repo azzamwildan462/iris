@@ -24,14 +24,21 @@
 #include "lmdb.h"
 
 // #define COMM_DEBUG // Activate it to debug
-#define COMM_MULTICAST_TEST  // Activate it to test program
-#define USE_REALTIME_PROCESS // Activate it to use realtime process
+#define COMM_MULTICAST_TEST // Activate it to test program
+// #define USE_REALTIME_PROCESS // Activate it to use realtime process
 
 #define E(expr) CHECK((rc = (expr)) == MDB_SUCCESS, #expr)
 #define RES(err, expr) ((rc = expr) == (err) || (CHECK(!rc, #expr), 0))
 #define CHECK(test, msg) ((test) ? (void)0 : ((void)fprintf(stderr, "%s:%d: %s: %s\n", __FILE__, __LINE__, msg, mdb_strerror(rc)), abort()))
 #define PERR(txt, par...) printf("ERROR: (%s / %s): " txt "\n", __FILE__, __FUNCTION__, ##par)
 #define PERRNO(txt) printf("ERROR: (%s / %s): " txt ": %s\n", __FILE__, __FUNCTION__, strerror(errno))
+
+#define TXN_DBI_EXIST(txn, dbi, validity) \
+    ((txn) && (dbi) < (txn)->mt_numdbs && ((txn)->mt_dbflags[dbi] & (validity)))
+
+#define TTUP_US_DEFAULT 20E3 // 10Hz -> 100E3, 20Hz -> 50E3
+#define TTUP_US_50Hz 10E3
+#define PROGRAM_FREQUENCY 25
 
 // Compress data
 #define UNCOMPRESS 0
@@ -64,10 +71,19 @@ pthread_attr_t thread_attr;
 uint8_t end_signal_counter;
 
 // Data
-char data[128] = "its3123456908its";
+char data[128] = "its3123123";
 // char data[128];
 char its[4] = "its";
 unsigned long int actual_data_size = 15;
+
+int TTUP_US = TTUP_US_50Hz;
+int timer;
+
+static void signal_catch(int sig)
+{
+    if (sig == SIGALRM)
+        timer++;
+}
 
 int if_NameToIndex(char *ifname, char *address)
 {
@@ -163,12 +179,12 @@ int openSocket()
     }
 
     /* Disable reception of our own multicast */
-    // opt = 0;
-    // if ((setsockopt(multiSocket.socketID, IPPROTO_IP, IP_MULTICAST_LOOP, &opt, sizeof(opt))) == -1)
-    // {
-    //     PERRNO("setsockopt");
-    //     return -1;
-    // }
+    opt = 0;
+    if ((setsockopt(multiSocket.socketID, IPPROTO_IP, IP_MULTICAST_LOOP, &opt, sizeof(opt))) == -1)
+    {
+        PERRNO("setsockopt");
+        return -1;
+    }
 
     if (bind(multiSocket.socketID, (struct sockaddr *)&multicastAddress, sizeof(struct sockaddr_in)) == -1)
     {
@@ -187,15 +203,29 @@ void loadConfig()
 {
     // Hardcode
     nw_config.iface = "wlp0s20f3";
-    strcpy(nw_config.multicast_ip, "224.168.1.80");
-    nw_config.port = 2482;
+    strcpy(nw_config.multicast_ip, "224.16.32.80");
+    nw_config.port = 1026;
     nw_config.compress_type = UNCOMPRESS;
-    uint8_t identifier_buffer = 3;
+    uint8_t identifier_buffer = 0;
     sprintf(nw_config.identifier, "%d", identifier_buffer);
 }
 
 int saveData(MDB_env *env, MDB_dbi *dbi, char *data_recvd)
 {
+    // int8_t byte1;
+    // int16_t byte2;
+
+    // memcpy(&byte1, data_recvd + 0, 1);
+    // memcpy(&byte2, data_recvd + 1, 2);
+
+    // printf("1: %d | 2: %d\n", byte1, byte2);
+
+    char awek[10];
+    memcpy(awek, data_recvd, 4);
+    // printf("awek: %s\n", awek);
+
+    printf("int awek: %d\n", atoi(awek));
+
     // Header check
     if (data_recvd[0] != 'i' || data_recvd[1] != 't' || data_recvd[2] != 's')
     {
@@ -209,27 +239,41 @@ int saveData(MDB_env *env, MDB_dbi *dbi, char *data_recvd)
 
     // Data to be saved
     char identifier[1];
-    char keys[4][16] = {"odom_x", "odom_y", "odom_theta"};
-    int key_size[4] = {7, 7, 11};
-    int value_pos[4] = {4, 7, 10};
-    int value_size[4] = {3, 3, 3};
-    int total_items = 3;
+    char keys[13][32] = {"odom_x", "odom_y", "odom_theta", "status_bola",
+                         "bola_x_lap", "bola_y_lap", "robot_condition", "target_umpan", "status_algo",
+                         "status_sub_algo", "status_sub_sub_algo", "status_sub_sub_sub_algo"};
+    // key_size = actual + 1 (identifier)
+    int key_size[13] = {7, 7, 11, 12, 11, 11, 16, 13, 12, 16, 20, 24};
+    int value_pos[13] = {4, 6, 8, 10, 11, 13, 15, 17, 18, 20, 22, 24};
+    int value_size[13] = {2, 2, 2, 1, 2, 2, 2, 1, 2, 2, 2, 2};
+    int total_items = 12;
 
     // Get identifier
     memcpy(&identifier, data_recvd + 3, 1);
 
+    if (identifier[0] == '0')
+        return -3;
+
     // Push data to DB
     E(mdb_txn_begin(env, NULL, 0, &txn));
+    E(mdb_dbi_open(txn, NULL, 0, dbi));
     char data_buffer[1024];
     for (int i = 0; i < total_items; i++)
     {
-        // printf("key_size: %d\n", key_size[i]);
-        strcat(keys[i], identifier);
+        memcpy(keys[i] + key_size[i] - 1, data_recvd + 3, 1);
+        // printf("key: %s\n", keys[i]);
         key.mv_size = key_size[i];
         key.mv_data = keys[i];
         value.mv_size = value_size[i];
         memcpy(&data_buffer, data_recvd + value_pos[i], value_size[i]);
+        // int16_t debug;
+        // memcpy(&debug, data_recvd + value_pos[i], value_size[i]);
+        // printf("key: %s | val %d\n", keys[i], debug);
         value.mv_data = data_buffer;
+        // printf("txn_dbi: %d\n", TXN_DBI_EXIST(txn, *dbi, 0x10));
+        // rc = mdb_put(txn, *dbi, &key, &value, 0);
+        // printf("rc: %d\n", rc);
+
         if (RES(MDB_PROBLEM, mdb_put(txn, *dbi, &key, &value, 0)) != 0)
         {
             mdb_txn_abort(txn);
@@ -237,33 +281,87 @@ int saveData(MDB_env *env, MDB_dbi *dbi, char *data_recvd)
         }
     }
     E(mdb_txn_commit(txn));
-    // E(mdb_env_stat(env, &mst));
 
     return 0;
+}
+void loadDataFrame(MDB_env *env, MDB_dbi *dbi)
+{
+    int rc;
+    MDB_val key, value;
+    MDB_txn *txn;
+    // char keyname[8] = "from_js";
+    char keyname[8] = "header";
+
+    uint16_t nmux1;
+    int16_t x_offset;
+
+    // E(mdb_txn_begin(env, NULL, 0, &txn));
+    // key.mv_size = 7;
+    // key.mv_data = keyname;
+    // if (RES(MDB_PROBLEM, mdb_get(txn, *dbi, &key, &value)) != 0)
+    // {
+    //     mdb_txn_abort(txn);
+    //     return;
+    // }
+    // E(mdb_txn_commit(txn));
+    // memcpy(data, value.mv_data, value.mv_size);
+    // memcpy(&nmux1, data + 24, 2);
+    // memcpy(&x_offset, data + 12, 2);
+    // printf("x_offset: %d\n", x_offset);
+    // printf("nmux1: %d\n", nmux1);
+    // printf("from_js: %s\n", value.mv_data);
+
+    E(mdb_txn_begin(env, NULL, 0, &txn));
+    key.mv_size = 6;
+    key.mv_data = keyname;
+    if (RES(MDB_PROBLEM, mdb_get(txn, *dbi, &key, &value)) != 0)
+    {
+        mdb_txn_abort(txn);
+        return;
+    }
+    E(mdb_txn_commit(txn));
+    memcpy(&x_offset, value.mv_data, value.mv_size);
+    printf("data: %s\n", value.mv_data);
+    printf("atoi: %d\n", atoi((char *)value.mv_data));
+    printf("x_offset: %d\n", x_offset);
 }
 
 void loadData(MDB_env *env, MDB_dbi *dbi)
 {
+    int dead;
+    mdb_reader_check(env, &dead);
+    if (dead != 0)
+        printf("[LMDB] Cleared %d reader stalls\n", dead);
     // Create init variables
     int rc;
-    MDB_val key, value;
     MDB_txn *txn;
 
-    // Data to be saved
-    char identifier[1];
-    char keys[4][16] = {"odom_x", "odom_y", "odom_theta"};
-    int key_size[4] = {7, 7, 11};
-    // int value_pos[4] = {4, 7, 10};
-    // int value_size[4] = {3, 3, 3};
-    int total_items = 3;
+    // Data to be loaded
+    // char identifier[1];
+    char keys[30][16] = {"header", "command", "style", "bola_x", "bola_y", "auto_kal", "offset_x",
+                         "offset_y", "offset_th", "manual_x", "manual_y", "manual_th", "nrbtmux1", "nrbtmux2", "kec_rbt1",
+                         "kec_rbt2", "kec_rbt3", "kec_rbt4", "kec_rbt5", "kec_sdt_rbt1", "kec_sdt_rbt2", "kec_sdt_rbt3",
+                         "kec_sdt_rbt4", "kec_sdt_rbt5", "kec_tndg_rbt1", "kec_tndg_rbt2", "kec_tndg_rbt3", "kec_tndg_rbt4",
+                         "kec_tndg_rbt5"};
+    int key_size[30] = {6, 7, 5, 6, 6, 8, 8, 8, 9, 8, 8, 9, 8, 8, 8, 8, 8, 8, 8, 12, 12, 12, 12, 12, 13, 13, 13, 13, 13};
+    int data_pos[30] = {4, 5, 6, 7, 9, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42};
+    int data_size[30] = {1, 1, 1, 2, 2, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+    int total_items = 29;
+
+    bzero(data, actual_data_size);
 
     // Get data from DB
     E(mdb_txn_begin(env, NULL, 0, &txn));
+    // E(mdb_dbi_open(txn, NULL, 0, dbi));
+
     // char data_buffer[1024];
     int value_pos = 4;
     for (int i = 0; i < total_items; i++)
     {
-        strcat(keys[i], nw_config.identifier);
+        // strcat(keys[i], nw_config.identifier);
+        // bzero(value.mv_data, value.mv_size);
+        MDB_val key, value;
+
         key.mv_size = key_size[i];
         key.mv_data = keys[i];
         if (RES(MDB_PROBLEM, mdb_get(txn, *dbi, &key, &value)) != 0)
@@ -271,14 +369,21 @@ void loadData(MDB_env *env, MDB_dbi *dbi)
             mdb_txn_abort(txn);
             return;
         }
-        memcpy(data, its, 3);                                   // Header
-        memcpy(data + 3, nw_config.identifier, 1);              // identifier
-        memcpy(data + value_pos, value.mv_data, value.mv_size); // data
-        value_pos += value.mv_size;
+        char buf_buf[value.mv_size];
+        memcpy(buf_buf, value.mv_data, (int)value.mv_size);
+        int buf = atoi(buf_buf);
+        // printf("key: %s | %d %d %d -> %s -> %d\n", key.mv_data, data_pos[i], atoi((char *)value.mv_data), value.mv_size, value.mv_data, buf);
+        memcpy(data, its, 3);                           // Header
+        memcpy(data + 3, nw_config.identifier, 1);      // identifier
+        memcpy(data + data_pos[i], &buf, data_size[i]); // data
     }
     E(mdb_txn_commit(txn));
-    actual_data_size = value_pos;
-    printf("data_to_send: %s | size %d\n", data, value_pos);
+    actual_data_size = data_pos[total_items - 1] + data_size[total_items - 1];
+
+    // uint16_t qwe;
+    // memcpy(&qwe, data + 24, 2);
+    // printf("qwe: %d\n", qwe);
+    // printf("data_to_send: %s | size %d\n", data, actual_data_size);
 }
 
 int sendData()
@@ -288,7 +393,7 @@ int sendData()
         // Just send
         int nsent = sendto(multiSocket.socketID, data, actual_data_size, 0, (struct sockaddr *)&multiSocket.destAddress, sizeof(struct sockaddr));
 #ifdef COMM_MULTICAST_TEST
-        // printf("[send] size %d, data %s\n", actual_data_size, data);
+        // printf("[send] size %d, data %s\n", nsent, data);
 #endif
         if (nsent == actual_data_size)
             return 0;
@@ -362,15 +467,16 @@ void *receiveData(void *arg)
     MDB_env *env;
     MDB_dbi dbi;
     MDB_txn *txn;
-    int dead;
-    int err = mdb_reader_check(env, &dead);
+    // int dead;
+    // int err = mdb_reader_check(env, &dead);
 
     E(mdb_env_create(&env));
     E(mdb_env_set_maxreaders(env, 5));
     E(mdb_env_set_mapsize(env, 10485760)); // 10 MB
-    E(mdb_env_open(env, "dependencies/lmdb/libraries/liblmdb/cpp_js", MDB_FIXEDMAP | MDB_NOSYNC, 0664));
+    E(mdb_env_open(env, "dependencies/lmdb/libraries/liblmdb/cpp_js", MDB_WRITEMAP | MDB_NOSYNC | MDB_NOMETASYNC, 0664));
     E(mdb_txn_begin(env, NULL, 0, &txn));
-    E(mdb_dbi_open(txn, NULL, MDB_DUPSORT, &dbi));
+    E(mdb_dbi_open(txn, NULL, 0, &dbi));
+    // E(mdb_dbi_open(txn, NULL, MDB_DUPSORT, &dbi));
     mdb_txn_commit(txn);
 
     while (end_signal_counter == 0)
@@ -410,6 +516,7 @@ void *receiveData(void *arg)
                 pthread_exit(NULL);
                 return NULL;
             }
+
 #if defined(COMM_DEBUG) || defined(COMM_MULTICAST_TEST)
             printf("[recv] nrecv: %d -> %s \n", recv_data_size, recv_data);
 #endif
@@ -428,19 +535,76 @@ void signalHandler(int sig)
         abort();
 }
 
+void loadDummyData()
+{
+    bzero(data, actual_data_size);
+    memcpy(data, its, 3);
+    memcpy(data + 3, nw_config.identifier, 1);
+    // Deklare
+    int8_t dummy_header = 'i';
+    int8_t dummy_command = 'S';
+    int8_t dummy_style = 'E';
+    int16_t dummy_bola_x_pada_lapangan = 123;
+    int16_t dummy_bola_y_pada_lapangan = 200;
+    int8_t dummy_auto_kalibrasi = 1;
+    int16_t dummy_offset_bs_x = 90;
+    int16_t dummy_offset_bs_y = 120;
+    int16_t dummy_offset_bs_theta = 90;
+    int16_t dummy_target_manual_x = 180;
+    int16_t dummy_target_manual_y = 90;
+    int16_t dummy_target_manual_theta = 45;
+    uint16_t dummy_data_n_robot_mux1 = 46655;
+    uint16_t dummy_data_n_robot_mux2 = 46655;
+    uint8_t dummy_trim_kecepatan_robot[5] = {12, 23, 34, 45, 56};
+    uint8_t dummy_trim_kecepatan_sudut_robot[5] = {10, 5, 14, 7, 14};
+    uint8_t dummy_trim_kecepatan_tendang_robot[5] = {17, 9, 10, 16, 18};
+
+    // Ngisi frame
+    memcpy(data + 4, &dummy_header, 1);
+    memcpy(data + 5, &dummy_command, 1);
+    memcpy(data + 6, &dummy_style, 1);
+    memcpy(data + 7, &dummy_bola_x_pada_lapangan, 2);
+    memcpy(data + 9, &dummy_bola_y_pada_lapangan, 2);
+    memcpy(data + 11, &dummy_auto_kalibrasi, 1);
+    memcpy(data + 12, &dummy_offset_bs_x, 2);
+    memcpy(data + 14, &dummy_offset_bs_y, 2);
+    memcpy(data + 16, &dummy_offset_bs_theta, 2);
+    memcpy(data + 18, &dummy_target_manual_x, 2);
+    memcpy(data + 20, &dummy_target_manual_y, 2);
+    memcpy(data + 22, &dummy_target_manual_theta, 2);
+    memcpy(data + 24, &dummy_data_n_robot_mux1, 2);
+    memcpy(data + 26, &dummy_data_n_robot_mux2, 2);
+    memcpy(data + 28, dummy_trim_kecepatan_robot, 5);
+    memcpy(data + 33, dummy_trim_kecepatan_sudut_robot, 5);
+    memcpy(data + 38, dummy_trim_kecepatan_tendang_robot, 5);
+
+    int16_t get_buf;
+    memcpy(&get_buf, data + 18, 2);
+
+    actual_data_size = 43;
+
+    // printf("data_send: %d | %s\n", actual_data_size, data);
+}
+
 int main()
 {
+    // loadConfig();
+    // loadDummyData();
+    // return 0;
     // int rc;
     // MDB_env *env;
     // MDB_dbi dbi;
     // MDB_txn *txn;
 
+    // loadConfig();
+
     // E(mdb_env_create(&env));
     // E(mdb_env_set_maxreaders(env, 5));
     // E(mdb_env_set_mapsize(env, 10485760)); // 10 MB
-    // E(mdb_env_open(env, "dependencies/lmdb/libraries/liblmdb/js_cpp", MDB_FIXEDMAP | MDB_NOSYNC, 0664));
+    // E(mdb_env_open(env, "dependencies/lmdb/libraries/liblmdb/js_cpp", MDB_WRITEMAP | MDB_NOSYNC | MDB_NOMETASYNC, 0664));
     // E(mdb_txn_begin(env, NULL, 0, &txn));
-    // E(mdb_dbi_open(txn, NULL, MDB_DUPSORT, &dbi));
+    // E(mdb_dbi_open(txn, NULL, 0, &dbi));
+    // // E(mdb_dbi_open(txn, NULL, MDB_DUPSORT, &dbi));
     // mdb_txn_commit(txn);
 
     // saveData(env, &dbi, data);
@@ -449,14 +613,20 @@ int main()
     // saveData(env, &dbi, data);
     // saveData(env, &dbi, data);
     // saveData(env, &dbi, data);
+
+    // printf("Success\n");
     // return 0;
 
-    printf("Start..\n");
     struct sched_param proc_sched;
+    struct itimerval it;
+    struct timeval tempTimeStamp;
+
+    TTUP_US = 1E6 / ((float)PROGRAM_FREQUENCY);
+    printf("Start..\n");
 
     loadConfig();
 
-    // LMDB load data
+    // // LMDB load data
     // int rc;
     // MDB_env *env;
     // MDB_dbi dbi;
@@ -467,18 +637,26 @@ int main()
     // E(mdb_env_create(&env));
     // E(mdb_env_set_maxreaders(env, 5));
     // E(mdb_env_set_mapsize(env, 10485760)); // 10 MB
-    // E(mdb_env_open(env, "dependencies/lmdb/libraries/liblmdb/cpp_js", MDB_FIXEDMAP | MDB_NOSYNC, 0664));
+    // E(mdb_env_open(env, "dependencies/lmdb/libraries/liblmdb/js_cpp", MDB_FIXEDMAP | MDB_NOSYNC, 0664));
     // E(mdb_txn_begin(env, NULL, 0, &txn));
-    // E(mdb_dbi_open(txn, NULL, MDB_DUPSORT, &dbi));
+    // E(mdb_dbi_open(txn, NULL, 0, &dbi));
     // mdb_txn_commit(txn);
 
     // loadData(env, &dbi);
-    // loadData(env, &dbi);
-    // loadData(env, &dbi);
-    // loadData(env, &dbi);
+    // // loadData(env, &dbi);
+    // // loadData(env, &dbi);
+    // // loadData(env, &dbi);
+    // // loadDataFrame(env, &dbi);
     // return 0;
 
     signal(SIGINT, signalHandler);
+
+    timer = 0;
+    if (signal(SIGALRM, signal_catch) == SIG_ERR)
+    {
+        PERRNO("signal");
+        return -1;
+    }
 
 #ifdef USE_REALTIME_PROCESS
     proc_sched.sched_priority = 60;
@@ -514,33 +692,38 @@ int main()
     MDB_env *env;
     MDB_dbi dbi;
     MDB_txn *txn;
-    int dead;
-    int err = mdb_reader_check(env, &dead);
+    // int dead;
+    // int err = mdb_reader_check(env, &dead);
 
     E(mdb_env_create(&env));
     E(mdb_env_set_maxreaders(env, 5));
     E(mdb_env_set_mapsize(env, 10485760));                                                               // 10 MB
     E(mdb_env_open(env, "dependencies/lmdb/libraries/liblmdb/js_cpp", MDB_FIXEDMAP | MDB_NOSYNC, 0664)); //
     E(mdb_txn_begin(env, NULL, 0, &txn));
-    E(mdb_dbi_open(txn, NULL, MDB_DUPSORT, &dbi));
+    E(mdb_dbi_open(txn, NULL, 0, &dbi));
     mdb_txn_commit(txn);
 
-#ifdef COMM_MULTICAST_TEST
+    /* Set itimer to reactivate the program */
+    it.it_value.tv_usec = (__suseconds_t)(TTUP_US);
+    it.it_value.tv_sec = 0;
+    it.it_interval.tv_usec = (__suseconds_t)(TTUP_US);
+    it.it_interval.tv_sec = 0;
+    setitimer(ITIMER_REAL, &it, NULL);
+
     int counter;
     while (end_signal_counter == 0)
     {
-        if (++counter % 100000000 == 0)
+        double waitTime = (2 * (((double)rand()) / ((double)RAND_MAX)) - 1) * TTUP_US * 0.05 + TTUP_US;
+        usleep(waitTime);
+        loadData(env, &dbi);
+        // loadDummyData();
+        if (sendData() == -1)
         {
-            // printf("counters: %d\n", counter);
-            loadData(env, &dbi);
-            if (sendData() == -1)
-            {
-                PERR("sendData");
-                return -1;
-            }
+            PERR("sendData");
+            return -1;
         }
     }
-#endif
+
     printf("Success\n");
 
     return 0;
